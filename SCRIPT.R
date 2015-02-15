@@ -1,10 +1,7 @@
-# ABSTRACT SUBMISSION FOR IROES 2015 CONGRESS
-# IDEA: COMPARE R METHODS FOR COMPETING RISKS MODELS, FINE&GRAY MODEL VS GESKUS APPROACH BASED ON REWEIGHTING
+# crr.vs.crprep.1: compare time needed to estimate a Fine & Gray model using "crr" function vs the time needed using "crprep" + "coxph"
+# each procedure runs M times, and results are averaged
 
-require(compiler)
-enableJIT(3)
-
-crr.vs.crprep = function(n, M=1000, seed=1234){
+crr.vs.crprep.1 = function(n, M=1000, seed=1234){
    require(mstate)
    require(cmprsk)
    
@@ -56,7 +53,10 @@ crr.vs.crprep = function(n, M=1000, seed=1234){
    return(results.matrix)
 }
 
-crr.vs.crprep2 = function(n, M=1000, seed=1234){
+# crr.vs.crprep.2: compare time needed to estimate M Fine & Gray models using "crr" function vs the time needed using "crprep" once + "coxph" M times
+# total elapsed time is returned
+
+crr.vs.crprep.2 = function(n, M, seed=1234){
    require(mstate)
    require(cmprsk)
    
@@ -110,22 +110,3 @@ crr.vs.crprep2 = function(n, M=1000, seed=1234){
    results.matrix[,4] = results.matrix[,3]/results.matrix[,2]
    return(results.matrix)
 }
-
-timesvec = c(50,100,500,1000,5000,10000)
-
-aaa = crr.vs.crprep(n=timesvec, M=100)
-
-aaa2list=list()
-mvec = c(10,50,100,1000)
-for(m in 1:length(mvec)){
-	aaa2list[[m]] = crr.vs.crprep2(n=c(50,100,500,1000), M=mvec[m])
-}
-
-plot(aaa[,1], aaa[,2], 
-     type="n", 
-     ylim=c(0, max(aaa[,2:5])),
-     xlab="n",
-     ylab="Time")
-lines(aaa[,1],aaa[,3], col=1)
-lines(aaa[,1],aaa[,5], col=2)
-legend("topleft", c("CRR-SYSTEM","CRR-ELAPSED", "CRPREP-SYSTEM", "CRPREP-ELAPSED"), col=c(1,1,2,2), lty=c(1,2,1,2))
