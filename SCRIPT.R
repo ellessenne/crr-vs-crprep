@@ -1,112 +1,60 @@
-# crr.vs.crprep.1: compare time needed to estimate a Fine & Gray model using "crr" function vs the time needed using "crprep" + "coxph"
-# each procedure runs M times, and results are averaged
-
-crr_vs_crprep_1 <- function(n, M = 1000, seed = 1234){
-   require(mstate)
-   require(cmprsk)
-
-   #seed for reproducibility
-   set.seed <- seed
-
-   results_matrix <- matrix(0, nrow = length(n), ncol = 4)
-   colnames(results_matrix) = c("n", "CRR.ELAP", "CRPREP.ELAP", "ratio")
-
-   for(j in 1:length(n)){
-      results_matrix[j, 1] <- n[j]
-      # generate data
-      nn <- n[j]
-      ev1times <- rexp(nn, rate = 0.1)
-      ev2times <- rexp(nn, rate = 0.2)
-      censtimes <- runif(n = nn, min = 0, max = .5 * max(ev1times, ev2times))
-      time <- pmin(ev1times, ev2times, censtimes)
-      status <- rep(0, nn)
-      status[(ev1times < censtimes) & (ev1times < ev2times)] <- 1
-      status[(ev2times < censtimes) & (ev2times < ev1times)] <- 2
-      trt <- sample(c("Y", "N"), size = nn, replace = TRUE)
-      dataset <- data.frame(time, status, trt)
-
-      #crr
-      crr_elap_tmp = rep(0, M)
-      for(i in 1:M){
-         tstart <- proc.time()
-         fit_tmp <- with(dataset, crr(ftime = time, fstatus = status, cov1 = c(trt), failcode = 2, cencode = 0))
-         tstop <- proc.time()
-         telapsed <- tstop - tstart
-         crr_elap_tmp[i] <- telapsed[3]
-      }
-      results_matrix[j, 2] <- mean(crr_elap_tmp)
-
-      #crprep
-      crprep_elap_tmp <- rep(0,M)
-      for(i in 1:M){
-         tstart <- proc.time()
-         dataset_wt <- with(dataset, crprep(Tstop = time, status = status, data = dataset, trans = c(1, 2), cens = 0, keep = dataset))
-         fit_tmp <- with(dataset_wt, coxph(Surv(Tstart, Tstop, status == 1) ~ trt, weigh = weight.cens, subset = (failcode == 1)))
-         tstop <- proc.time()
-         telapsed <- tstop - tstart
-         crprep_elap_tmp[i] <- telapsed[3]
-      }
-      results_matrix[j, 3] <- mean(crprep_elap_tmp)
-
-   }
-   results_matrix[, 4] <- results_matrix[, 3] / results_matrix[, 2]
-   return(results_matrix)
+# gen_cr_data: function to generate a competing risks dataset, with customizable sample size and just one competing event for simplicity
+gen_cr_data <- function(n = 1000, seed = 1234){
+  set.seed(seed)
+  require(dplyr)
+  data <- data_frame(time0 = rexp(n, 0.1),
+                     time1 = rexp(n, 0.5),
+                     time2 = rexp(n, 1)) %>%
+    mutate(time = round(1 + 100 * pmin(time0, time1, time2)),
+           status = ifelse(time1 == pmin(time0, time1, time2),
+                           1,
+                           ifelse(time2 == pmin(time0, time1, time2),
+                                  2,
+                                  0)),
+           trt = sample(0:1, n, replace = TRUE),
+           age = abs(rnorm(n, 50, 10))) %>%
+    select(-time0, -time1, -time2)
+  return(tbl_df(data))
 }
 
-# crr.vs.crprep.2: compare time needed to estimate M Fine & Gray models using "crr" function vs the time needed using "crprep" once + "coxph" M times
-# total elapsed time is returned
+gen_cr_data()
 
-crr_vs_crprep_2 <- function(n, M, seed = 1234){
-   require(mstate)
-   require(cmprsk)
+# crr_vs_crprep_1: compare time needed to estimate a Fine & Gray model using "crr" function vs the time needed using "crprep" + "coxph"
 
-   #seed for reproducibility
-   set.seed <- seed
+crr_vs_crprep1 <- function(ssize, B = 1000){
+  if (length(ssize) != 1) stop("ssize cannot be a vector.")
+  require(pacman)
+  p_load("cmprsk", "mstate", "microbenchmark")
+  d <- gen_cr_data(round(ssize))
+  mb <- microbenchmark(
+    "CRR" = with(d, crr(ftime = time, fstatus = status, cov1 = cbind(age, trt), tf = function(t) t, failcode = 1, cencode = 0)),
+    "CRPREP + COXPH" = with(with(d, crprep(Tstop = time, status = status, data = d, trans = 1:2, cens = 0, keep = cbind(age, trt))),
+                            coxph(Surv(Tstart, Tstop, status == 1) ~ age + trt, weights = weight.cens, subset = (failcode == 1))),
+    times = B
+  )
+  return(mb)
+}
 
-   results_matrix <- matrix(0, nrow = length(n), ncol = 4)
-   colnames(results_matrix) = c("n", "CRR.ELAP", "CRPREP.ELAP", "ratio")
+# crr_vs_crprep2: compare time needed to estimate M Fine & Gray models using "crr" function vs the time needed using "crprep" once + "coxph" M times
 
-   for(j in 1:length(n)){
-      results_matrix[j, 1] <- n[j]
-      # generate data
-      nn <- n[j]
-      ev1times <- rexp(nn, rate = 0.1)
-      ev2times <- rexp(nn, rate = 0.2)
-      censtimes <- runif(n = nn, min = 0, max = .5 * max(ev1times, ev2times))
-      time <- pmin(ev1times, ev2times, censtimes)
-      status <- rep(0, nn)
-      status[(ev1times < censtimes) & (ev1times < ev2times)] <- 1
-      status[(ev2times < censtimes) & (ev2times < ev1times)] <- 2
-      trt <- sample(c("Y", "N"), size = nn, replace = TRUE)
-      dataset <- data_frame(time, status, trt)
+# regular
+f1 <- function(d, M){
+  with(d, lapply(1:M, function(x) crr(ftime = time, fstatus = status, cov1 = cbind(age, trt), tf = function(t) t, failcode = 1, cencode = 0)))
+}
+# weighted
+f2 <- function(d, M){
+  d_wt <- with(d, crprep(Tstop = time, status = status, data = d, trans = 1:2, cens = 0, keep = cbind(age, trt)))
+  with(d_wt, lapply(1:M, function(x) coxph(Surv(Tstart, Tstop, status == 1) ~ age + trt, weights = weight.cens, subset = (failcode == 1))))
+}
 
-      #crr
-      crr_elap_tmp <- rep(0, M)
-      for(i in 1:M){
-         tstart <- proc.time()
-         fit_tmp <- with(dataset, crr(ftime = time, fstatus = status, cov1 = c(trt), failcode = 2, cencode = 0))
-         tstop <- proc.time()
-         telapsed <- tstop - tstart
-         crr_elap_tmp[i] <- telapsed[3]
-      }
-      results_matrix[j, 2] <- sum(crr_elap_tmp)
-
-      #crprep
-      crprep_elap_tmp <- rep(0, M)
-      tstart <- proc.time()
-      dataset_wt <- with(dataset, crprep(Tstop = time, status = status, data = dataset, trans = c(1, 2), cens = 0, keep = dataset))
-      tstop <- proc.time()
-      trw <- tstop - tstart
-      for(i in 1:M){
-         tstart <- proc.time()
-         fit_tmp <- with(dataset_wt, coxph(Surv(Tstart, Tstop, status == 1) ~ trt, weigh = weight.cens, subset = (failcode == 1)))
-         tstop <- proc.time()
-         telapsed <- tstop - tstart
-         crprep_elap_tmp[i] <- telapsed[3]
-      }
-      results_matrix[j, 3] <- sum(crprep_elap_tmp) + trw[3]
-
-   }
-   results_matrix[, 4] <- results_matrix[, 3] / results_matrix[, 2]
-   return(results_matrix)
+crr_vs_crprep2 <- function(M, ssize = 100, B = 1000){
+  require(pacman)
+  p_load("cmprsk", "mstate", "microbenchmark", "parallel")
+  d <- gen_cr_data(round(ssize))
+  mb <- microbenchmark(
+    "CRR" = f1(d, M),
+    "CRPREP + COXPH" = f2(d, M),
+    times = B
+  )
+  return(mb)
 }

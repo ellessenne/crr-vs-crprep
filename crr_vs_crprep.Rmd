@@ -1,0 +1,173 @@
+---
+title: "Performance comparison of crr and crprep + coxph"
+author: "Alessandro Gasparini"
+date: "`r Sys.time()`"
+output: html_document
+---
+```{r setup}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, eval = FALSE)
+```
+# gen_cr_data( )
+
+```{r gen_cr_data}
+gen_cr_data <- function(n = 1000){
+  require(dplyr)
+  data <- data_frame(time0 = rexp(n, 0.1),
+                     time1 = rexp(n, 0.5),
+                     time2 = rexp(n, 1)) %>%
+    mutate(time = round(1 + 100 * pmin(time0, time1, time2)),
+           status = ifelse(time1 == pmin(time0, time1, time2),
+                           1,
+                           ifelse(time2 == pmin(time0, time1, time2),
+                                  2,
+                                  0)),
+           trt = sample(0:1, n, replace = TRUE),
+           age = abs(rnorm(n, 50, 10))) %>%
+    select(-time0, -time1, -time2)
+  return(tbl_df(data))
+}
+```
+
+This function generates a dataset with 2 competing events, a factor with two levels `trt` and a continuous variable `age`. Sample size is customizable by the user changing the argument `n` (default value is 1.000).
+
+Use `set.seed()` for reproducibility.
+
+# crr_vs_crprep1( )
+
+```{r crr_vs_crprep1}
+crr_vs_crprep1 <- function(ssize, B = 1000){
+  if (length(ssize) != 1) stop("ssize cannot be a vector.")
+  require(pacman)
+  p_load("cmprsk", "mstate", "microbenchmark")
+    d <- gen_cr_data(round(ssize))
+    mb <- microbenchmark(
+      "CRR" = with(d, crr(ftime = time, fstatus = status, cov1 = cbind(age, trt), tf = function(t) t, failcode = 1, cencode = 0)),
+      "CRPREP + COXPH" = with(with(d, crprep(Tstop = time, status = status, data = d, trans = 1:2, cens = 0, keep = cbind(age, trt))),
+                              coxph(Surv(Tstart, Tstop, status == 1) ~ age + trt, weights = weight.cens, subset = (failcode == 1))),
+      times = B
+      )
+    return(mb)
+}
+```
+
+This function compares the time necessary to estimate a Fine & Gray model using the standard estimator versus the time necessary to compute weights and consequently a weighted Cox semiparametric model, as suggested in [1], using the `microbenchmark()` function from the homonymous package [2].
+
+This function works with a single sample size at a time, and it is possible to set the number of replications with the `B` argument (defaul of 1.000 replications).
+
+To obtain time estimates for different sample sizes, use `lapply` (`lapply(c(10, 100, 1000), crr_vs_crprep1)`) or the least efficient `for` cycle.
+
+# crr_vs_crprep2( )
+
+First, define two separate functions for the two procedures:
+
+```{r crr_vs_crprep2_1}
+# Regular
+f1 <- function(d, M){
+        with(d, lapply(1:M, function(x) crr(ftime = time, fstatus = status, cov1 = cbind(age, trt), tf = function(t) t, failcode = 1, cencode = 0)))
+}
+# Weighted
+f2 <- function(d, M){
+          d_wt <- with(d, crprep(Tstop = time, status = status, data = d, trans = 1:2, cens = 0, keep = cbind(age, trt)))
+          with(d_wt, lapply(1:M, function(x) coxph(Surv(Tstart, Tstop, status == 1) ~ age + trt, weights = weight.cens, subset = (failcode == 1))))
+      }
+```
+
+Then, compare the two:
+
+```{r crr_vs_crprep2_2}
+crr_vs_crprep2 <- function(M, ssize = 100, B = 1000){
+  if (length(ssize) != 1) stop("ssize cannot be a vector.")
+  require(pacman)
+  p_load("cmprsk", "mstate", "microbenchmark", "parallel")
+    d <- gen_cr_data(round(ssize))
+    mb <- microbenchmark(
+      "CRR" = f1(d, M),
+      "CRPREP + COXPH" = f2(d, M),
+      times = B
+      )
+    return(mb)
+}
+```
+
+This function compares the time necessary to estimate `M` Fine & Gray models using the standard `crr()` function from the `cmprsk` package versus the time necessary to estimate the same number of models restructuring the data first (`crprep` function) and then using the weighted Cox regression model.
+
+This function works with a single sample size at a time, and it is possible to set the number of models to estimate with the `M` argument(default to 100 models) and the number of replications with the `B` argument (defaul to 1.000 replications).
+
+To obtain time estimates for different sample sizes act analogously to `crr_vs_crprep1()`.
+
+# Usage
+
+## Simulation 1
+
+```{r usage1}
+require(pacman)
+p_load("ggplot2", "parallel", "ggthemes")
+ssizes <- c(50, 100, 500, 1000, 5000, 10000)
+uno <- lapply(ssizes, crr_vs_crprep1, B = 1000)
+jnd <- bind_rows(mclapply(1:length(ssizes), 
+                          function(x){ 
+                            return(cbind(uno[[x]], ssize = ssizes[x]))
+                            }))
+
+ggplot(data = jnd, aes(x = expr, y = time)) + geom_boxplot() + facet_wrap(~ ssize, nrow = round(length(ssizes) / 3)) + labs(title = "", x = "", y = "Time: log10(ms)") + scale_y_log10() + theme_few()
+
+for(i in ssizes){
+  print(i)
+  print(with(filter(jnd, ssize == i), wilcox.test(time ~ expr)))
+}
+```
+
+## Simulation 2
+
+```{r usage2}
+require(pacman)
+p_load("ggplot2", "parallel", "ggthemes")
+ssizes <- c(100, 1000, 10000)
+emmes <- c(10, 50, 100)
+bi <- 1000
+
+#1st Sample Size
+dos1 <- lapply(emmes, crr_vs_crprep2, ssize = ssizes[1], B = bi); dos1
+jnd <- bind_rows(mclapply(1:length(emmes),
+                            function(x){ 
+                              return(cbind(dos1[[x]], emme = emmes[x]))
+                              }))
+jnd1 <- mutate(jnd, ssize = ssizes[1])
+
+#2nd Sample Size
+dos2 <- lapply(emmes, crr_vs_crprep2, ssize = ssizes[2], B = bi); dos2
+jnd <- bind_rows(mclapply(1:length(emmes),
+                            function(x){ 
+                              return(cbind(dos2[[x]], emme = emmes[x]))
+                              }))
+jnd2 <- mutate(jnd, ssize = ssizes[2])
+
+#3rd Sample Size
+dos3 <- lapply(emmes, crr_vs_crprep2, ssize = ssizes[3], B = bi); dos3
+jnd <- bind_rows(mclapply(1:length(emmes),
+                            function(x){ 
+                              return(cbind(dos3[[x]], emme = emmes[x]))
+                              }))
+jnd3 <- mutate(jnd, ssize = ssizes[3])
+
+#Combine
+jnd_t <- bind_rows(jnd1, jnd2, jnd3) %>%
+  mutate(fct = paste("n =", ssize, "| m =", emme))
+
+# jnd_t$fct = factor(jnd_t$fct, levels = c("n = 100 | m = 10", "n = 100 | m = 50", "n = 100 | m = 100", "n = 1000 | m = 10", "n = 1000 | m = 50", "n = 1000 | m = 100", "n = 10000 | m = 10", "n = 10000 | m = 50", "n = 10000 | m = 100"))
+
+for(i in levels(factor(jnd_t$fct))){
+  print(i)
+  print(with(filter(jnd_t, fct == i), wilcox.test(time ~ expr)))
+}
+
+ggplot(data = jnd_t, aes(x = expr, y = time)) + geom_boxplot() + facet_wrap(~ fct, nrow = length(ssizes)) + labs(title = "", x = "", y = "Time: log10(ms)") + scale_y_log10() + theme_few()
+```
+
+# References
+
+[1] R. B. Geskus, _Cause-specific cumulative incidence estimation and the Fine and Gray model under both left truncation and right censoring_, Biometrics, 67, 39–49 (2011)
+
+[2] `microbenchmark` package on [CRAN](http://cran.r-project.org/web/packages/microbenchmark/microbenchmark.pdf)
+
+[3] `parallel` package on [CRAN](https://stat.ethz.ch/R-manual/R-devel/library/parallel/doc/parallel.pdf)
